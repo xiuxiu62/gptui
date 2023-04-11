@@ -3,10 +3,12 @@ use chatgpt::{
     types::{ChatMessage, ResponseChunk},
 };
 use clap::Parser;
-use colored::Colorize;
+use colored::{Color, ColoredString, Colorize};
 use futures_util::StreamExt;
+use reedline::{PromptEditMode, PromptHistorySearchStatus, PromptViMode, Reedline, Signal};
 use serde::{Deserialize, Serialize};
 use std::{
+    borrow::Cow,
     fs::{self, File},
     io::{self, Write},
     path::PathBuf,
@@ -14,8 +16,82 @@ use std::{
 
 // const AI_NAME: &str = "hiro";
 // const DEFAULT_CONFIG_PATH: &str = "/home/xiuxiu/.config/gptui/config.json";
+//
+const COMMANDS: &str = "
+commands:
+    help - displays this message
+    exit - exits the application";
 
 type DynResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+pub static PROMPT_INDICATOR: &str = ": ";
+pub static MULTILINE_INDICATOR: &str = "::: ";
+pub static VI_INSERT_PROMPT_INDICATOR: &str = "[i]: ";
+pub static VI_NORMAL_PROMPT_INDICATOR: &str = "[n]: ";
+
+struct Prompt(ColoredString);
+
+impl Prompt {
+    pub fn new(username: &str, foreground: Color) -> Self {
+        Self(username.color(foreground))
+    }
+}
+
+impl Default for Prompt {
+    fn default() -> Self {
+        Self::new(whoami::username().as_str(), Color::Cyan)
+    }
+}
+
+impl reedline::Prompt for Prompt {
+    fn render_prompt_left(&self) -> Cow<str> {
+        Cow::Borrowed(&self.0)
+    }
+
+    fn render_prompt_right(&self) -> Cow<str> {
+        Cow::Borrowed("")
+    }
+
+    fn render_prompt_indicator(&self, edit_mode: PromptEditMode) -> Cow<str> {
+        match edit_mode {
+            PromptEditMode::Default | PromptEditMode::Emacs => PROMPT_INDICATOR.into(),
+            PromptEditMode::Vi(vi_mode) => match vi_mode {
+                PromptViMode::Normal => VI_NORMAL_PROMPT_INDICATOR.into(),
+                PromptViMode::Insert => VI_INSERT_PROMPT_INDICATOR.into(),
+            },
+            PromptEditMode::Custom(str) => format!("({str})").into(),
+        }
+    }
+
+    fn render_prompt_multiline_indicator(&self) -> Cow<str> {
+        Cow::Borrowed(MULTILINE_INDICATOR)
+    }
+
+    fn render_prompt_history_search_indicator(
+        &self,
+        history_search: reedline::PromptHistorySearch,
+    ) -> std::borrow::Cow<str> {
+        let prefix = match history_search.status {
+            PromptHistorySearchStatus::Passing => "",
+            PromptHistorySearchStatus::Failing => "failing ",
+        };
+
+        // NOTE: magic strings, given there is logic on how these compose I am not sure if it
+        // is worth extracting in to static constant
+        Cow::Owned(format!(
+            "({}reverse-search: {}) ",
+            prefix, history_search.term
+        ))
+    }
+
+    fn get_prompt_color(&self) -> reedline::Color {
+        reedline::Color::Cyan
+    }
+
+    fn get_indicator_color(&self) -> reedline::Color {
+        reedline::Color::White
+    }
+}
 
 #[tokio::main]
 async fn main() -> DynResult<()> {
@@ -25,7 +101,61 @@ async fn main() -> DynResult<()> {
         None => Config::generate()?,
     };
 
-    run(config).await
+    // let args = Args::parse();
+    // let config = match args.config() {
+    //     Some(config) => config,
+    //     None => Config::generate()?,
+    // };
+
+    // run(config).await
+    //
+    example(config).await
+}
+
+async fn example(config: Config) -> DynResult<()> {
+    let mut line_editor = Reedline::create();
+    let prompt = Prompt::default();
+    let client = ChatGPT::new(&config.api_key)?;
+    let mut conversation = client.new_conversation();
+
+    system_println(COMMANDS);
+    query(
+        &config,
+        &mut conversation,
+        &format!(
+            "My name is {}, please refer to me as that as often as makes conversation sense.
+             Your name is {}, introduce yourself.",
+            whoami::username(),
+            &config.ai_name(),
+        ),
+    )
+    .await?;
+
+    loop {
+        match line_editor.read_line(&prompt) {
+            Ok(Signal::Success(buffer)) => match buffer.as_str() {
+                "help" => system_println(COMMANDS),
+                "exit" => {
+                    query(&config, &mut conversation, "Goodbye").await?;
+                    break;
+                }
+                request => {
+                    query(&config, &mut conversation, &request).await?;
+                }
+            },
+            Ok(signal) if matches!(signal, Signal::CtrlC | Signal::CtrlD) => {
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+#[inline]
+fn system_println(message: &str) {
+    println!("{}: {message}", "system".red());
 }
 
 // fn example_code_parse() -> DynResult<()> {
@@ -102,16 +232,16 @@ async fn run(config: Config) -> DynResult<()> {
     // let client = ChatGPT::new(API_KEY)?;
     let mut conversation = client.new_conversation();
 
-    query(
-        &config,
-        &mut conversation,
-        &format!(
-            "My name is {user}, please refer to me as that as often as makes conversation sense.
-             Your name is {}, introduce yourself.",
-            config.ai_name(),
-        ),
-    )
-    .await?;
+    // query(
+    //     &config,
+    //     &mut conversation,
+    //     &format!(
+    //         "My name is {user}, please refer to me as that as often as makes conversation sense.
+    //          Your name is {}, introduce yourself.",
+    //         config.ai_name(),
+    //     ),
+    // )
+    // .await?;
 
     loop {
         let mut request = "".to_owned();
